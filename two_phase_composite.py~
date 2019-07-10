@@ -1,0 +1,325 @@
+from math import sqrt, pi, sin, cos
+import os
+import h5py as hp
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+import scipy.integrate as integrate
+from scipy.optimize import fsolve
+from fenics import *
+from dolfin import *
+
+import mat_constants as cst
+
+
+def _mkdir(d):  # great piece of code by Matevz
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    return 1
+
+
+def make_mesh(fileDir, dx, n):
+    fileName = fileDir+"geometry.geo"
+    fid = open(fileName, "wt")
+    index = n*10000
+
+    print("Point(%d) = {%f, %f, %f, %f};" %
+          (index+1, -cst.L1/2-cst.L2/2, -0.1, 0.0, dx), file=fid)
+    print("Point(%d) = {%f, %f, %f, %f};" %
+          (index+2, -cst.L1/2, -0.1, 0.0, dx), file=fid)
+    print("Point(%d) = {%f, %f, %f, %f};" %
+          (index+3, cst.L1/2, -0.1, 0.0, dx), file=fid)
+    print("Point(%d) = {%f, %f, %f, %f};" %
+          (index+4, cst.L1/2+cst.L2/2, -0.1, 0.0, dx), file=fid)
+    print("Point(%d) = {%f, %f, %f, %f};" %
+          (index+5, cst.L1/2+cst.L2/2, 0.1, 0.0, dx), file=fid)
+    print("Point(%d) = {%f, %f, %f, %f};" %
+          (index+6, cst.L1/2, 0.1, 0.0, dx), file=fid)
+    print("Point(%d) = {%f, %f, %f, %f};" %
+          (index+7, -cst.L1/2, 0.1, 0.0, dx), file=fid)
+    print("Point(%d) = {%f, %f, %f, %f};" %
+          (index+8, -cst.L1/2-cst.L2/2, 0.1, 0.0, dx), file=fid)
+
+    print("Line(%d) = {%d, %d};" % (index+1, index+1, index+2), file=fid)
+    print("Line(%d) = {%d, %d};" % (index+2, index+2, index+3), file=fid)
+    print("Line(%d) = {%d, %d};" % (index+3, index+3, index+4), file=fid)
+    print("Line(%d) = {%d, %d};" % (index+4, index+4, index+5), file=fid)
+    print("Line(%d) = {%d, %d};" % (index+5, index+5, index+6), file=fid)
+    print("Line(%d) = {%d, %d};" % (index+6, index+6, index+7), file=fid)
+    print("Line(%d) = {%d, %d};" % (index+7, index+7, index+8), file=fid)
+    print("Line(%d) = {%d, %d};" % (index+8, index+8, index+1), file=fid)
+    print("Line(%d) = {%d, %d};" % (index+9, index+7, index+2), file=fid)
+    print("Line(%d) = {%d, %d};" % (index+10, index+6, index+3), file=fid)
+
+    print("Line Loop(%d) = {%d, %d, %d, %d};" %
+          (index+11, index+1, -(index+9), index+7, index+8), file=fid)
+
+    print("Line Loop(%d) = {%d, %d, %d, %d};" %
+          (index+12, index+2, -(index+10), index+6, index+9), file=fid)
+
+    print("Line Loop(%d) = {%d, %d, %d, %d};" %
+          (index+13, index+3, index+4, index+5, index+10), file=fid)
+
+    print("Plane Surface(%s) = {%s};" %
+          (str(10+1), str(index+11)), file=fid)
+    print("Plane Surface(%s) = {%s};" %
+          (str(10+2), str(index+12)), file=fid)
+    print("Plane Surface(%s) = {%s};" %
+          (str(10+3), str(index+13)), file=fid)
+
+    fid.close()
+    os.system('gmsh -2 %sgeometry.geo' % (fileDir))
+    os.system('dolfin-convert %sgeometry.msh %sgeometry.xml' %
+              (fileDir, fileDir))
+    mesh = Mesh('%sgeometry.xml' % (fileDir))
+    plot(mesh, linewidth=0.1)
+    plt.savefig('%sgeometry.pdf' % (fileDir))
+
+
+# xmin = (-.5, - 0.5)
+# xmax = (0.5, 0.5)
+
+
+def getPB():
+    class PeriodicBoundary(SubDomain):
+        # Left boundary is "target domain" G
+        def inside(self, x, on_boundary):
+            # return True if on left or bottom boundary
+            # AND NOT on one of the two corners (0, 1) and (1, 0)
+            return bool(on_boundary and ((near(x[0], -0.5, cst.tol) and not near(x[1], 0.1, cst.tol)) or
+                                         (near(x[1], -0.1, cst.tol) and not near(x[0], 0.5, cst.tol))))
+
+        def map(self, x, y):
+            if (near(x[0], 0.5, cst.tol) and near(x[1], 0.1, cst.tol)):
+                y[0] = x[0] - 1
+                y[1] = x[1] - 0.2
+            elif near(x[0], 0.5, cst.tol):
+                y[0] = x[0] - 1
+                y[1] = x[1]
+            else:
+                y[0] = x[0]
+                y[1] = x[1] - 0.2
+    return PeriodicBoundary
+
+
+# def getBoundary(x, on_boundary):
+#     return bool((near(x[0], xmin[0], cst.tol) and near(x[1], xmin[1], cst.tol)) or (near(x[0], xmax[0], cst.tol) and near(x[1], xmax[1], cst.tol)))
+
+
+def get_Mat2():
+    class Mat2(SubDomain):
+        def inside(self, x, on_boundary):
+            return bool((x[0] > cst.L1/2) or (x[0] < -cst.L1/2))
+    return Mat2()
+
+
+def make_banddiagram(meshFileName, neigs=2, k_res1=20, PeriodicBoundary=""):
+
+    mesh = Mesh(meshFileName)
+    V = FunctionSpace(mesh, 'P', 1, constrained_domain=PeriodicBoundary())
+    # bc = DirichletBC(V, Constant(0.), getBoundary, method='pointwise')
+    u = TrialFunction(V)
+    v = TestFunction(V)
+    P = FiniteElement('P', mesh.ufl_cell(), 1)
+    V2 = FunctionSpace(mesh, P*P, constrained_domain=PeriodicBoundary())
+
+    def eigen_solver(V, kV, neigs=2):
+        vals = np.zeros(2)
+        kV.eval(vals, np.zeros(3))
+        print("Solving for k: ", vals)
+
+        mu1 = cst.mu1
+        mu2 = cst.mu2
+        rho1 = cst.rho1
+        rho2 = cst.rho2
+
+        i, j, k, l = indices(4)
+
+        def ep(f):
+            return as_tensor(Dx(f, i), [i])
+
+        def qf(f):
+            return as_tensor(kV[i]*f, [i])
+
+        fR, fI = TestFunctions(V)
+        gR, gI = TrialFunctions(V)
+
+        domains = MeshFunction("size_t", mesh, mesh.topology().dim())
+        domains.set_all(0)
+        mat2 = get_Mat2()
+        mat2.mark(domains, 1)
+        dX = dx(domain=mesh, subdomain_data=domains)
+
+        aR = mu1*(inner(ep(fR), ep(gR))*dX(0)+inner(ep(fI), ep(gI))*dX(0)-inner(ep(fR), qf(gI))*dX(0)+inner(ep(fI), qf(gR))*dX(0)+inner(qf(fR), ep(gI))*dX(0)+inner(qf(fR), qf(gR))*dX(0)-inner(qf(fI), ep(gR))*dX(0)+inner(qf(fI), qf(gI))*dX(0)) + \
+            mu2*(inner(ep(fR), ep(gR))*dX(1)+inner(ep(fI), ep(gI))*dX(1)-inner(ep(fR), qf(gI))*dX(1)+inner(ep(fI), qf(gR))*dX(1) +
+                 inner(qf(fR), ep(gI))*dX(1)+inner(qf(fR), qf(gR))*dX(1)-inner(qf(fI), ep(gR))*dX(1)+inner(qf(fI), qf(gI))*dX(1))
+
+        aI = mu1*(inner(ep(fR), ep(gI))*dX(0)-inner(ep(fI), ep(gR))*dX(0)+inner(ep(fR), qf(gR))*dX(0)+inner(ep(fI), qf(gI))*dX(0)-inner(qf(fR), ep(gR))*dX(0)+inner(qf(fR), qf(gR))*dX(0)-inner(qf(fI), ep(gI))*dX(0)-inner(qf(fI), qf(gR))*dX(0)) + \
+            mu2*(inner(ep(fR), ep(gI))*dX(1)-inner(ep(fI), ep(gR))*dX(1)+inner(ep(fR), qf(gR))*dX(1)+inner(ep(fI), qf(gI))*dX(1) -
+                 inner(qf(fR), ep(gR))*dX(1)+inner(qf(fR), qf(gR))*dX(1)-inner(qf(fI), ep(gI))*dX(1)-inner(qf(fI), qf(gR))*dX(1))
+
+        a = aR  # + aI
+        mR = cst.rho1*(inner(fR, gR)*dX(0) + inner(fI, gI)*dX(0)) + \
+            cst.rho2*(inner(fR, gR)*dX(1) + inner(fI, gI)*dX(1))
+        mI = cst.rho1*(inner(fR, gI)*dX(0) - inner(fI, gR)*dX(0)) + \
+            cst.rho2*(inner(fR, gI)*dX(1) - inner(fI, gR)*dX(1))
+
+        m = mR  # + mI
+
+        A = PETScMatrix()
+        M = PETScMatrix()
+        assemble(a, tensor=A)
+        assemble(m, tensor=M)
+
+        # Create eigensolver
+        solver = SLEPcEigenSolver(A, M)
+        solver.parameters["solver"] = "krylov-schur"
+        solver.parameters["problem_type"] = "gen_hermitian"
+        #solver.parameters["spectrum"] = "smallest magnitude"
+        solver.parameters["spectrum"] = "target magnitude"
+        solver.parameters["spectral_transform"] = "shift-and-invert"
+        solver.parameters["spectral_shift"] = 1.0
+
+        solver.solve(neigs)
+
+        ct = np.sqrt(cst.mu1/cst.rho1)
+        a_norm = 1
+
+        computed_eigenvalues = []
+        for i in range(min(neigs, solver.get_number_converged())):
+            if (i == 1):
+                r, _, rx1, _ = solver.get_eigenpair(
+                    i)  # ignore the imaginary part
+                computed_eigenvalues.append(r)
+                print(sqrt(r)/2./pi*a_norm/ct)
+            elif (i == 2):
+                r, _, rx2, _ = solver.get_eigenpair(
+                    i)  # ignore the imaginary part
+                computed_eigenvalues.append(r)
+                print(sqrt(r)/2./pi*a_norm/ct)
+            else:
+                r, _ = solver.get_eigenvalue(i)  # ignore the imaginary part
+                computed_eigenvalues.append(r)
+
+        o2 = np.sort(np.array(computed_eigenvalues))
+        # print(o2)
+        freq = np.sqrt(abs(o2))/2./pi
+        # np.sqrt
+        return freq, rx1, rx2, domains
+
+    def calc_bandgaps_1D(V=V2, neigs=neigs, k_res1=20):
+        bandgaps = []
+        kVecs = []
+        k_res = 2*k_res1
+        kts = np.linspace(-1, 1, k_res)
+        # tol = 1e-14
+        for kt in kts:
+            # if (kt <= 1):
+            #     kx = pi/cst.Wx
+            #     ky = (pi/cst.Wy)*(1.0-kt)
+            # elif (kt < 2):
+            #     kx = (2.0-kt)*(pi/cst.Wx)
+            #     ky = 0
+            # elif (kt < 3):
+            #     kx = (kt-2)*(pi/cst.Wx)
+            #     ky = (kt-2)*(pi/cst.Wy)
+            # elif (kt < 4):
+            #     kx = (4.0-kt)*(pi/cst.Wx)
+            #     ky = pi/cst.Wy
+            # elif(kt < 5):
+            #     kx = 0.0
+            #     ky = (5.0-kt)*(pi/cst.Wy)
+            # elif(kt < 6+tol):
+            #     kx = -(kt-5.0)*(pi/cst.Wx)
+            #     ky = (kt-5.0)*(pi/cst.Wy)
+            # else:
+            #     break
+            kx = pi*kt
+            ky = 0.
+
+            kV = Constant((kx, ky))
+            freqt, rx1, rx2, domains = eigen_solver(V2, kV, neigs=neigs)
+            bandgaps.append(freqt)
+            kVecs.append([kx, ky])
+        bArray = np.array(bandgaps)
+        bArray = np.sort(bArray, axis=1)
+        # xticksLoc = [(k_res-1)/k_n * i for i in range(k_n+1)]
+        # xticksLabel = ["M", "X", r"$\Gamma$",
+        #                "M", "Y", r"$\Gamma$", "M\'", "Y"]
+        # tuple(xticksLoc), tuple(xticksLabel),
+        return bArray, kVecs, rx1, rx2, domains
+
+    bArray, kVecs, rx1, rx2, domains = calc_bandgaps_1D(
+        V2, neigs=neigs, k_res1=k_res1)  # xticksLoc, xticksLabel,
+
+    _mkdir("BandDiagram/cache/")
+
+    dm = plot(domains)
+    plt.colorbar(dm)
+    plt.show()
+
+    psi1 = Function(V2)
+    psi2 = Function(V2)
+
+    psi1.vector()[:] = rx1
+    psi2.vector()[:] = rx2
+
+    ps1r = Function(V)
+    ps1i = Function(V)
+    ps2r = Function(V)
+    ps2i = Function(V)
+
+    ps1r, ps1i = psi1.split()
+    ps2r, ps2i = psi2.split()
+
+    fp = File("rx1r.pvd")
+    fp << ps1r
+    fp = File("rx1i.pvd")
+    fp << ps1i
+    fp = File("rx2r.pvd")
+    fp << ps2r
+    fp = File("rx2i.pvd")
+    fp << ps2i
+    p1r = plot(ps1r)
+    plt.colorbar(p1r)
+    plt.show()
+    p1i = plot(ps1i)
+    plt.colorbar(p1i)
+    plt.show()
+    p2r = plot(ps2r)
+    plt.colorbar(p2r)
+    plt.show()
+    p2i = plot(ps2i)
+    plt.colorbar(p2i)
+    plt.show()
+
+    # normalisation
+    ct = np.sqrt(cst.mu1/cst.rho1)
+    a_norm = 1
+    bArray = bArray*a_norm/(ct)
+
+    plt.figure(figsize=(5, 5))
+    fig, ax = plt.subplots()
+
+    ax.plot(bArray, color="blue", linewidth=0.4)
+    ax.set_ylim((0, 3))
+    ax.grid()
+    ax.set_ylabel(r"Normalized Frequency, $\omega a / 2\pi c_T$")
+    ax.set_xlabel(r"Reduced Wave Vector $\mathbf{k}$ ")
+    # ax.set_xticks(xticksLoc)
+    # ax.set_xticklabels(xticksLabel)
+    # ax.set_title(r"Symmetry p4mm-pm, $\mu ={}$,  $Fr={}$".format(mu, phi))
+    plt.savefig("BandDiagram/1D_1.png", dpi=300)
+    plt.close()
+
+
+if __name__ == '__main__':
+    fileDir = "meshes/two_phase_composite/"
+    _mkdir(fileDir)
+    meshFileName = fileDir+"geometry.xml"
+    _mkdir(fileDir)
+
+    make_mesh(fileDir, 0.01, 10000)
+    PeriodicBoundary = getPB()
+    make_banddiagram(meshFileName, neigs=10, k_res1=20,
+                     PeriodicBoundary=PeriodicBoundary)
